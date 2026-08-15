@@ -1,5 +1,4 @@
-import { resolve } from 'node:path';
-import { config } from './config.ts';
+import { scriptPath } from './assets.ts';
 
 export interface CoreInfo {
   id: number;
@@ -29,7 +28,7 @@ let cached: Topology | null = null;
 export async function getTopology(): Promise<Topology> {
   if (cached) return cached;
 
-  const script = resolve(config.root, 'server', 'telemetry', 'topology.ps1');
+  const script = await scriptPath('topology.ps1');
   const proc = Bun.spawn(
     ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script],
     { stdout: 'pipe', stderr: 'pipe' },

@@ -113,10 +113,6 @@ export async function setBoostMode(scheme: string, mode: number): Promise<void> 
   await setValue(scheme, 'PERFBOOSTMODE', mode);
 }
 
-export async function setCoolingPolicy(scheme: string, policy: number): Promise<void> {
-  await setValue(scheme, 'SYSCOOLPOL', policy);
-}
-
 /** Reads back what is actually in effect, so the UI reflects reality rather
  *  than what we last tried to write. */
 export async function readSettings(scheme: string): Promise<Settings> {
@@ -154,11 +150,40 @@ export async function readSettings(scheme: string): Promise<Settings> {
     p: read(1),
     e: read(0),
     boostMode: values.get('PERFBOOSTMODE') ?? 2,
-    coolingPolicy: values.get('SYSCOOLPOL') ?? 1,
   };
 }
 
-export async function applySettings(scheme: string, s: Settings): Promise<void> {
+/**
+ * Values that are written but never varied.
+ *
+ * stateMax is a percentage of a moving target with a cliff at the top: 100 is
+ * the only setting that permits turbo, so the first step below it costs about
+ * two thirds of the clock (measured on the 12800H: 100% -> 3427 MHz, 75% ->
+ * 1132 MHz), and below 20% it is dead travel against the 400 MHz floor. It is
+ * a worse version of the frequency cap, which is absolute and predictable, so
+ * the cap is the only ceiling the app exposes.
+ *
+ * stateMin stays at the stock floor. Raising it just burns power at idle.
+ *
+ * maxCores is core parking, which does nothing on this class of chip — held at
+ * 25% with the CPU at 4% load, no core ever reported parked. Windows leaves
+ * parking off on modern hybrid parts and steers work with the scheduler.
+ */
+const FIXED = { stateMax: 100, stateMin: 5, maxCores: 100 } as const;
+
+/** Forces the fields the UI no longer exposes, whatever the caller passed.
+ *  Applied here rather than in the client so profiles, PM_RESTORE_LAST and
+ *  the API all get the same treatment. */
+export function normalise(s: Settings): Settings {
+  return {
+    ...s,
+    p: { ...s.p, ...FIXED },
+    e: { ...s.e, ...FIXED },
+  };
+}
+
+export async function applySettings(scheme: string, raw: Settings): Promise<void> {
+  const s = normalise(raw);
   const classes: Array<[EffClass, ClassSettings]> = [
     [1, s.p],
     [0, s.e],
@@ -171,7 +196,6 @@ export async function applySettings(scheme: string, s: Settings): Promise<void> 
     await setClassValue(scheme, cls, 'maxCores', cs.maxCores);
   }
   await setBoostMode(scheme, s.boostMode);
-  await setCoolingPolicy(scheme, s.coolingPolicy);
   await activate(scheme);
 }
 
@@ -180,7 +204,6 @@ export const STOCK: Settings = {
   p: { freqMax: 0, stateMax: 100, stateMin: 5, epp: 50, maxCores: 100 },
   e: { freqMax: 0, stateMax: 100, stateMin: 5, epp: 50, maxCores: 100 },
   boostMode: 2,
-  coolingPolicy: 1,
 };
 
 /** Fast path used by the governor: only the frequency caps change, and we skip

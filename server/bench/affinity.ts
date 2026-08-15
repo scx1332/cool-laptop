@@ -23,6 +23,19 @@ export async function setProcessAffinity(pid: number, mask: number): Promise<voi
   if (code !== 0) throw new Error(`failed to set affinity on pid ${pid}: ${err}`);
 }
 
+/** Kills a process and everything it spawned.
+ *
+ * The load generator is a parent of one burn process per thread. Killing only
+ * the parent leaves those children running at full tilt until their duration
+ * expires, which is exactly the wrong response to someone pressing cancel. */
+export async function killTree(pid: number): Promise<void> {
+  const proc = Bun.spawn(['taskkill.exe', '/PID', String(pid), '/T', '/F'], {
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+  await proc.exited;
+}
+
 export function maskToHex(mask: number): string {
   return '0x' + mask.toString(16).toUpperCase();
 }

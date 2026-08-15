@@ -14,9 +14,25 @@ interface Props {
   /** Force the axis to start at zero; true for power, false for clocks. */
   zeroBased?: boolean;
   decimals?: number;
+  /** Overrides the axis and tooltip number format — clocks read as GHz. */
+  format?: (v: number) => string;
+  /** Drawn as a dashed reference line, e.g. the base clock or an active cap. */
+  markers?: Array<{ value: number; label: string }>;
 }
 
 const PAD = { top: 10, right: 12, bottom: 22, left: 46 };
+
+/** Picks a step from the 1/2/5 x 10^n ladder so ticks land on round numbers
+ *  instead of the raw min..max interpolation, which produced axis labels like
+ *  1965 / 2556 / 3147 that changed on every incoming sample. */
+function niceStep(span: number, target: number): number {
+  const rough = span / Math.max(1, target);
+  const mag = 10 ** Math.floor(Math.log10(rough));
+  for (const m of [1, 2, 2.5, 5, 10]) {
+    if (mag * m >= rough) return mag * m;
+  }
+  return mag * 10;
+}
 
 /**
  * Small SVG time-series chart with a crosshair tooltip.
@@ -24,31 +40,51 @@ const PAD = { top: 10, right: 12, bottom: 22, left: 46 };
  * Deliberately single-axis: power and frequency live in separate charts rather
  * than sharing one plot with two scales.
  */
-export function Chart({ times, series, unit, height = 170, zeroBased = true, decimals = 0 }: Props) {
+export function Chart({
+  times,
+  series,
+  unit,
+  height = 170,
+  zeroBased = true,
+  decimals = 0,
+  format,
+  markers = [],
+}: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
   const width = 900;
 
-  const { min, max } = useMemo(() => {
+  // Domain and ticks are derived together: the axis is snapped outwards to
+  // whole steps so both ends of the plot sit on a labelled gridline.
+  const { min, max, ticks } = useMemo(() => {
     const all = series.flatMap((s) => s.values.filter((v): v is number => v != null));
-    if (!all.length) return { min: 0, max: 1 };
-    let lo = zeroBased ? 0 : Math.min(...all);
-    let hi = Math.max(...all);
+    const marks = markers.map((m) => m.value);
+    if (!all.length) return { min: 0, max: 1, ticks: [0, 1] };
+
+    let lo = zeroBased ? 0 : Math.min(...all, ...marks);
+    let hi = Math.max(...all, ...marks);
     if (hi === lo) hi = lo + 1;
     const pad = (hi - lo) * 0.08;
-    return { min: zeroBased ? 0 : lo - pad, max: hi + pad };
-  }, [series, zeroBased]);
+    if (!zeroBased) lo -= pad;
+    hi += pad;
+
+    const step = niceStep(hi - lo, 4);
+    const snappedLo = zeroBased ? 0 : Math.floor(lo / step) * step;
+    const snappedHi = Math.ceil(hi / step) * step;
+
+    const out: number[] = [];
+    // Accumulate off the index rather than by repeated addition, so a
+    // fractional step cannot drift a tick onto 2.9999999999.
+    for (let i = 0; snappedLo + i * step <= snappedHi + step / 1000; i++) {
+      out.push(Number((snappedLo + i * step).toPrecision(12)));
+    }
+    return { min: snappedLo, max: snappedHi, ticks: out };
+  }, [series, zeroBased, markers]);
 
   const n = times.length;
   const x = (i: number) => PAD.left + (n <= 1 ? 0 : (i / (n - 1)) * (width - PAD.left - PAD.right));
   const y = (v: number) =>
     PAD.top + (1 - (v - min) / (max - min)) * (height - PAD.top - PAD.bottom);
-
-  const ticks = useMemo(() => {
-    const out: number[] = [];
-    for (let i = 0; i <= 4; i++) out.push(min + ((max - min) * i) / 4);
-    return out;
-  }, [min, max]);
 
   function path(values: Array<number | null>): string {
     let d = '';
@@ -72,7 +108,7 @@ export function Chart({ times, series, unit, height = 170, zeroBased = true, dec
     setHover(Math.max(0, Math.min(n - 1, Math.round(t * (n - 1)))));
   }
 
-  const fmt = (v: number) => v.toFixed(decimals);
+  const fmt = (v: number) => format?.(v) ?? v.toFixed(decimals);
   const hoverTime = hover != null && times[hover] ? new Date(times[hover]) : null;
 
   return (
@@ -101,6 +137,31 @@ export function Chart({ times, series, unit, height = 170, zeroBased = true, dec
             </text>
           </g>
         ))}
+
+        {markers.map((m) =>
+          m.value < min || m.value > max ? null : (
+            <g key={m.label}>
+              <line
+                x1={PAD.left}
+                x2={width - PAD.right}
+                y1={y(m.value)}
+                y2={y(m.value)}
+                stroke="var(--axis)"
+                strokeWidth={1}
+                strokeDasharray="4 4"
+              />
+              <text
+                x={width - PAD.right - 4}
+                y={y(m.value) - 4}
+                textAnchor="end"
+                fontSize={9}
+                fill="var(--muted)"
+              >
+                {m.label}
+              </text>
+            </g>
+          ),
+        )}
 
         {series.map((s) => (
           <path

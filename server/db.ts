@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { config } from './config.ts';
 import type { BenchResult, Sample, Settings } from './types.ts';
@@ -10,8 +10,8 @@ if (config.dbPath !== ':memory:') {
 
 export const db = new Database(config.dbPath, { create: true });
 
-// WAL keeps the 1 Hz sample writes from blocking readers. Irrelevant for
-// :memory: but harmless.
+// WAL keeps sample writes from blocking readers, which matters in realtime
+// mode. Irrelevant for the default in-memory database.
 if (config.dbPath !== ':memory:') {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
@@ -159,13 +159,45 @@ export function deleteRun(id: number): number {
   return db.prepare('DELETE FROM bench_runs WHERE id = ?').run(id).changes;
 }
 
+/**
+ * The kv table holds the handful of values that must outlive the process: which
+ * power scheme to hand back to the user, and the measured clock calibration
+ * that costs twenty seconds of benchmarking to rediscover. With the database in
+ * memory those would be lost on every restart, so kv — and only kv, not the
+ * sample stream — is mirrored to a small JSON file.
+ */
+function readMirror(): Record<string, string> {
+  try {
+    return JSON.parse(readFileSync(config.statePath, 'utf8')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writeMirror(rows: Record<string, string>): void {
+  try {
+    mkdirSync(dirname(config.statePath), { recursive: true });
+    writeFileSync(config.statePath, JSON.stringify(rows, null, 2));
+  } catch (e) {
+    console.error('[db] could not persist state file:', e);
+  }
+}
+
+// Seed the table from the mirror so an in-memory database still starts with
+// whatever the last run learned.
+for (const [k, v] of Object.entries(readMirror())) {
+  db.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run(k, v);
+}
+
 export function kvGet<T>(key: string): T | null {
   const row = db.prepare('SELECT v FROM kv WHERE k = ?').get(key) as { v: string } | null;
   return row ? (JSON.parse(row.v) as T) : null;
 }
 
 export function kvSet(key: string, value: unknown): void {
-  db.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run(key, JSON.stringify(value));
+  const json = JSON.stringify(value);
+  db.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run(key, json);
+  writeMirror({ ...readMirror(), [key]: json });
 }
 
 export type StoredSettings = { settings: Settings; savedAt: number };

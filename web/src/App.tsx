@@ -3,7 +3,7 @@ import { api } from './api.ts';
 import { Bench } from './Bench.tsx';
 import { Chart, Legend, type Series } from './Chart.tsx';
 import { Controls } from './Controls.tsx';
-import { flagNames, type AppState, type Sample } from './types.ts';
+import { flagNames, type AppState, type RateState, type Sample } from './types.ts';
 
 const WINDOW = 180; // samples kept for the live charts
 
@@ -39,6 +39,11 @@ export function App() {
           setState((s) => (s ? { ...s, latest: payload } : s));
         } else if (type === 'settings') {
           setState((s) => (s ? { ...s, settings: payload } : s));
+        } else if (type === 'rate') {
+          setState((s) => (s ? { ...s, rate: payload } : s));
+          // Charts plot samples evenly spaced, so keeping minute-apart points
+          // next to second-apart ones would draw a lie.
+          setHistory([]);
         } else if (type === 'governor') {
           setState((s) => (s ? { ...s, governor: payload } : s));
         } else if (type === 'calibration') {
@@ -111,6 +116,15 @@ export function App() {
   const latest = state.latest;
   const throttles = latest ? [...new Set(latest.cpus.flatMap((c) => flagNames(c.flags)))] : [];
 
+  // Reference lines, so a clock reading means something without knowing the
+  // part. An applied cap is only drawn when one is actually set.
+  const clockMarkers = [
+    { value: state.calibration.pBaseMhz, label: 'P base' },
+    { value: state.calibration.eBaseMhz, label: 'E base' },
+    ...(state.settings.p.freqMax ? [{ value: state.settings.p.freqMax, label: 'P cap' }] : []),
+    ...(state.settings.e.freqMax ? [{ value: state.settings.e.freqMax, label: 'E cap' }] : []),
+  ];
+
   return (
     <div className="app">
       <header className="top">
@@ -123,8 +137,9 @@ export function App() {
         {latest && <span className="pill">{latest.onAc ? 'On AC' : 'On battery'}</span>}
         <span className="pill">
           <span className={`dot ${connected ? 'live' : 'down'}`} />
-          {connected ? `live · ${state.sampleIntervalMs / 1000}s` : 'disconnected'}
+          {connected ? `live · ${formatInterval(state.rate.intervalMs)}` : 'disconnected'}
         </span>
+        <RateToggle rate={state.rate} onStatus={setStatus} />
       </header>
       <p className="status-line" style={{ marginTop: 0 }}>
         {status}
@@ -136,9 +151,9 @@ export function App() {
         <Tile label="iGPU" value={latest?.power.gpu.toFixed(2) ?? '—'} unit="W" foot="RAPL pp1" />
         <Tile
           label="Peak clock"
-          value={latest?.maxMhz ?? '—'}
-          unit="MHz"
-          foot={`avg ${latest?.avgMhz ?? '—'}`}
+          value={latest ? formatGhz(latest.maxMhz) : '—'}
+          unit="GHz"
+          foot={latest ? `avg ${formatGhz(latest.avgMhz)}` : 'avg —'}
         />
         <Tile label="Utilisation" value={latest?.avgUtil.toFixed(0) ?? '—'} unit="%" foot="all cores" />
         <Tile
@@ -163,7 +178,14 @@ export function App() {
             <h2 style={{ margin: 0 }}>Clocks by class</h2>
             <Legend series={clockSeries} />
           </div>
-          <Chart times={times} series={clockSeries} unit="MHz" zeroBased={false} />
+          <Chart
+            times={times}
+            series={clockSeries}
+            unit="GHz"
+            zeroBased={false}
+            format={formatGhz}
+            markers={clockMarkers}
+          />
         </div>
       </div>
 
@@ -195,7 +217,7 @@ export function App() {
                   CPU {c.id} <span className="cls">{isP ? 'P' : 'E'}</span>
                 </div>
                 <div className="mhz" style={{ color: 'var(--text-primary)' }}>
-                  {c.mhz}
+                  {formatGhz(c.mhz)} <span className="u">GHz</span>
                 </div>
                 <div className="bar">
                   <i style={{ width: `${Math.min(100, c.util)}%` }} />
@@ -215,6 +237,57 @@ export function App() {
         </div>
       </div>
     </div>
+  );
+}
+
+function formatInterval(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${ms / 1000}s`;
+}
+
+/** Clocks read as GHz to two decimals. Four-digit MHz integers are the same
+ *  information, but they need a thousands separator to scan and they make
+ *  every axis label a different width. */
+export function formatGhz(mhz: number): string {
+  return (mhz / 1000).toFixed(2);
+}
+
+/** Switches the server between its quiet default and second-by-second
+ *  sampling. Realtime restarts the telemetry sidecar, so it takes a moment to
+ *  take effect, and the server forces it on regardless while a benchmark or
+ *  the governor is running — shown here rather than silently overriding the
+ *  button. */
+function RateToggle({ rate, onStatus }: { rate: RateState; onStatus: (m: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const forced = rate.holds.length > 0;
+
+  const toggle = async () => {
+    setBusy(true);
+    onStatus(rate.realtime ? 'dropping back to the idle sample rate…' : 'switching to realtime…');
+    try {
+      const next = await api.rate(!rate.realtime);
+      onStatus(`sampling every ${formatInterval(next.intervalMs)}`);
+    } catch (e) {
+      onStatus(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      className={rate.realtime ? 'active' : ''}
+      disabled={busy || forced}
+      onClick={() => void toggle()}
+      title={
+        forced
+          ? `realtime is held by: ${rate.holds.join(', ')}`
+          : `switch between ${formatInterval(rate.idleIntervalMs)} and ${formatInterval(
+              rate.realtimeIntervalMs,
+            )} sampling`
+      }
+    >
+      {forced ? `Realtime · ${rate.holds[0]}` : rate.realtime ? 'Realtime on' : 'Realtime'}
+    </button>
   );
 }
 

@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { scriptPath } from '../assets.ts';
 import { config } from '../config.ts';
 import { kvGet } from '../db.ts';
 import { getTopology } from '../topology.ts';
@@ -14,8 +14,13 @@ export interface Calibration {
   calibratedAt: number | null;
 }
 
+/** Placeholders until the first calibration run. The P value is the nominal
+ *  Windows itself reports (Win32_Processor.MaxClockSpeed), which is the
+ *  divisor the counter actually uses — not the P-core base clock from the
+ *  spec sheet, which is what the 2400 here used to be and which read every
+ *  P-core a third too fast. */
 export const DEFAULT_CALIBRATION: Calibration = {
-  pBaseMhz: 2400,
+  pBaseMhz: 1800,
   eBaseMhz: 1400,
   calibratedAt: null,
 };
@@ -37,6 +42,18 @@ export function loadCalibration(): void {
 
 type Listener = (s: Sample) => void;
 
+export interface RateState {
+  /** Cadence the sidecar is actually running at, in milliseconds. */
+  intervalMs: number;
+  /** True while sampling every second, whether the user asked for it or
+   *  something on the server did. */
+  realtime: boolean;
+  /** Set when realtime is forced by work in progress rather than chosen. */
+  holds: string[];
+  idleIntervalMs: number;
+  realtimeIntervalMs: number;
+}
+
 export class Telemetry {
   private proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'> | null = null;
   private listeners = new Set<Listener>();
@@ -46,12 +63,89 @@ export class Telemetry {
   history: Sample[] = [];
   private maxHistory = 900;
 
+  /** Cadence the user asked for; holds can force something faster. */
+  private requestedMs = config.idleIntervalMs;
+  /** Reasons the server currently needs realtime data regardless of the mode
+   *  the user picked — a running benchmark, an active governor. */
+  private holds = new Map<string, number>();
+  /** Cadence the running sidecar was started with. */
+  private activeMs = 0;
+  /** Rate changes are serialised: two of them overlapping would race to spawn
+   *  sidecars and leave an orphan reading counters forever. */
+  private queue: Promise<void> = Promise.resolve();
+  onRateChange: ((r: RateState) => void) | null = null;
+
+  get intervalMs(): number {
+    return this.holds.size > 0
+      ? Math.min(this.requestedMs, config.realtimeIntervalMs)
+      : this.requestedMs;
+  }
+
+  get rate(): RateState {
+    return {
+      intervalMs: this.activeMs || this.intervalMs,
+      realtime: (this.activeMs || this.intervalMs) <= config.realtimeIntervalMs,
+      holds: [...this.holds.keys()],
+      idleIntervalMs: config.idleIntervalMs,
+      realtimeIntervalMs: config.realtimeIntervalMs,
+    };
+  }
+
+  /** Switches the cadence the user sees. Returns once the sidecar is running
+   *  at the new rate. */
+  async setRealtime(on: boolean): Promise<RateState> {
+    this.requestedMs = on ? config.realtimeIntervalMs : config.idleIntervalMs;
+    await this.applyRate();
+    return this.rate;
+  }
+
+  /** Forces realtime for as long as the returned function is uncalled.
+   *  Refcounted, so two overlapping holders cannot cut each other short. */
+  hold(reason: string): () => void {
+    this.holds.set(reason, (this.holds.get(reason) ?? 0) + 1);
+    void this.applyRate();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const n = (this.holds.get(reason) ?? 1) - 1;
+      if (n > 0) this.holds.set(reason, n);
+      else this.holds.delete(reason);
+      void this.applyRate();
+    };
+  }
+
+  /** Resolves once any pending rate change has finished, so a caller that just
+   *  took a hold can wait for the faster data before relying on it. */
+  async settled(): Promise<void> {
+    await this.queue;
+  }
+
+  /** Restarts the sidecar when the wanted cadence no longer matches the
+   *  running one. The interval is a launch parameter of the PowerShell
+   *  process, so changing it means replacing the process — which costs a
+   *  couple of seconds of counter priming and leaves a short gap in the data.
+   *  Cheaper than the alternative of polling at 1 Hz forever and throwing
+   *  most of it away, which is the overhead we are trying to avoid. */
+  private applyRate(): Promise<void> {
+    this.queue = this.queue.then(async () => {
+      const wanted = this.intervalMs;
+      if (!this.proc || wanted === this.activeMs) return;
+      console.log(`[telemetry] switching to ${wanted} ms sampling`);
+      this.stop();
+      await this.start();
+      this.onRateChange?.(this.rate);
+    });
+    return this.queue;
+  }
+
   async start(): Promise<void> {
     if (this.proc) return;
     const topo = await getTopology();
     this.pCpuSet = new Set(topo.pCpus);
 
-    const script = resolve(config.root, 'server', 'telemetry', 'sidecar.ps1');
+    const interval = this.intervalMs;
+    const script = await scriptPath('sidecar.ps1');
     this.proc = Bun.spawn(
       [
         'powershell.exe',
@@ -61,10 +155,11 @@ export class Telemetry {
         '-File',
         script,
         '-IntervalMs',
-        String(config.sampleIntervalMs),
+        String(interval),
       ],
       { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' },
     ) as Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
+    this.activeMs = interval;
 
     void this.pump();
     void this.drainErrors();
@@ -166,6 +261,7 @@ export class Telemetry {
   stop(): void {
     this.proc?.kill();
     this.proc = null;
+    this.activeMs = 0;
   }
 }
 

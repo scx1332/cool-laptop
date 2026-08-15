@@ -1,11 +1,11 @@
-import { resolve } from 'node:path';
 import { config } from '../config.ts';
 import { readSettings } from '../control/powercfg.ts';
 import { saveRun } from '../db.ts';
 import { telemetry } from '../telemetry/poller.ts';
 import { affinityMask, getTopology } from '../topology.ts';
 import type { BenchRequest, BenchResult } from '../types.ts';
-import { setProcessAffinity } from './affinity.ts';
+import { killTree, setProcessAffinity } from './affinity.ts';
+import { spawnLoadgen } from './spawn.ts';
 
 /** Power and clocks take a moment to settle after a workload starts; ignoring
  *  the ramp keeps the averages representative of the steady state. */
@@ -26,7 +26,9 @@ export function isRunning(): boolean {
 
 export function cancelRun(): boolean {
   if (!active) return false;
-  active.proc.kill();
+  // The load generator has one child process per thread; killing the parent
+  // alone would leave them burning.
+  void killTree(active.proc.pid);
   return true;
 }
 
@@ -101,20 +103,8 @@ export async function runBenchmark(
       scoreUnit = 'MIPS';
     } else {
       const durationMs = (req.durationSec ?? 20) * 1000;
-      const script = resolve(config.root, 'server', 'bench', 'loadgen.ts');
-      // process.execPath, not "bun": on Windows `bun` on PATH is a .cmd shim
-      // that launches the real binary as a child. Affinity set on the shim
-      // does not reach that child, so the load silently escapes the mask.
-      const proc = Bun.spawn(
-        [process.execPath, script, String(threads), String(durationMs)],
-        { stdout: 'pipe', stderr: 'pipe', stdin: 'pipe' },
-      );
+      const proc = await spawnLoadgen(cpus, threads, durationMs);
       active = { proc, kind: req.kind };
-
-      // Pin first, then release the handshake, so no work happens off-mask.
-      await setProcessAffinity(proc.pid, mask);
-      proc.stdin.write('go\n');
-      proc.stdin.flush();
 
       onProgress({
         phase: 'running',

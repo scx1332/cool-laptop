@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run --watch server/index.ts",
-    "server": "bun run server/index.ts",
+    "dev": "bun run --watch server/main.ts",
+    "server": "bun run server/main.ts",
     "web": "vite --config web/vite.config.ts",
     "build": "vite build --config web/vite.config.ts",
-    "start": "bun run build && bun run server/index.ts"
+    "start": "bun run build && bun run server/main.ts",
+    "embed": "bun run scripts/embed-web.ts",
+    "build:exe": "bun run build && bun run embed && bun build --compile --minify --outfile dist/powermanagement.exe server/main.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

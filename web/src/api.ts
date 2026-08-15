@@ -1,4 +1,4 @@
-import type { AppState, RunRow, Settings } from './types.ts';
+import type { AppState, RateState, RunRow, Settings } from './types.ts';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -14,6 +14,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   state: () => req<AppState>('/api/state'),
+
+  /** Switches the telemetry cadence between one a minute and one a second. */
+  rate: (realtime: boolean) =>
+    req<RateState>('/api/rate', { method: 'POST', body: JSON.stringify({ realtime }) }),
 
   applySettings: (s: Settings) =>
     req<Settings>('/api/settings', { method: 'POST', body: JSON.stringify(s) }),

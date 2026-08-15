@@ -12,5 +12,12 @@
     "verbatimModuleSyntax": true,
     "types": ["bun"]
   },
-  "include": ["server/**/*.ts", "web/src/**/*.ts", "web/src/**/*.tsx", "web/*.ts"]
+  "include": [
+    "server/**/*.ts",
+    "server/**/*.d.ts",
+    "scripts/**/*.ts",
+    "web/src/**/*.ts",
+    "web/src/**/*.tsx",
+    "web/*.ts"
+  ]
 }

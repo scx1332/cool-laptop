@@ -1,5 +1,3 @@
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { runBenchmark, cancelRun, isRunning } from './bench/runner.ts';
 import { config } from './config.ts';
 import { governor } from './control/governor.ts';
@@ -7,6 +5,7 @@ import {
   activate,
   applySettings,
   ensureLabScheme,
+  normalise,
   readSettings,
   STOCK,
 } from './control/powercfg.ts';
@@ -26,13 +25,14 @@ import { calibrate } from './telemetry/calibrate.ts';
 import { getCalibration, loadCalibration, telemetry } from './telemetry/poller.ts';
 import { getTopology } from './topology.ts';
 import type { Settings } from './types.ts';
-
-const WEB_DIST = resolve(config.root, 'web', 'dist');
+import { serveWeb } from './web.ts';
 
 let labScheme = '';
 let originalScheme = '';
 let currentSettings: Settings = STOCK;
 let dirty = false; // true when anything non-stock is applied
+/** Held while the governor is running, so telemetry stays at 1 Hz for it. */
+let releaseGovernorRate: (() => void) | null = null;
 
 // ---------------------------------------------------------------- bootstrap
 
@@ -43,10 +43,30 @@ labScheme = schemes.lab;
 originalScheme = schemes.original;
 kvSet('originalScheme', originalScheme);
 await activate(labScheme);
-currentSettings = await readSettings(labScheme);
+// Normalised on the way in: the platform reports its own adjusted values for
+// the pinned fields, and echoing those back would advertise a state the app
+// does not actually honour.
+currentSettings = normalise(await readSettings(labScheme));
 governor.attach(labScheme);
 keeper.setDesired(currentSettings);
 keeper.start(labScheme);
+
+// Started headless with PM_RESTORE_LAST=1, put back whatever the UI last
+// applied. Without this a service comes up on the lab scheme as the platform
+// left it, which after a hard stop is neither stock nor what was asked for.
+if (config.restoreLast) {
+  const last = kvGet<Settings>('lastSettings');
+  if (last) {
+    await applySettings(labScheme, last);
+    currentSettings = last;
+    keeper.setDesired(last);
+    dirty = !isStock(last);
+    console.log(
+      `[pm] restored last settings: P cap ${last.p.freqMax || 'off'} MHz, ` +
+        `E cap ${last.e.freqMax || 'off'} MHz, EPP ${last.p.epp}/${last.e.epp}`,
+    );
+  }
+}
 
 await telemetry.start();
 const topology = await getTopology();
@@ -56,6 +76,11 @@ console.log(
     `P: ${topology.pCpus.join(',')} | E: ${topology.eCpus.join(',') || 'none'}`,
 );
 console.log(`[pm] lab scheme ${labScheme} (restoring ${originalScheme} on exit)`);
+console.log(
+  `[pm] sampling every ${config.idleIntervalMs / 1000}s ` +
+    `(realtime mode: ${config.realtimeIntervalMs / 1000}s) — ` +
+    `database ${config.dbPath === ':memory:' ? 'in memory' : config.dbPath}`,
+);
 
 // -------------------------------------------------------------- ws plumbing
 
@@ -81,6 +106,7 @@ telemetry.subscribe((sample) => {
 });
 
 governor.onChange = (s) => broadcast('governor', s);
+telemetry.onRateChange = (r) => broadcast('rate', r);
 
 // Prune on a slow timer so the table cannot grow without bound.
 setInterval(() => {
@@ -91,18 +117,28 @@ setInterval(() => {
 /** If every browser tab is gone and we left the CPU restricted, put it back.
  *  A forgotten 1 GHz cap is a genuinely annoying way to lose an afternoon. */
 setInterval(() => {
+  if (config.watchdogMs <= 0) return; // disabled: running unattended on purpose
   if (clients.size > 0) {
     lastClientSeenAt = Date.now();
     return;
   }
-  if (!dirty) return;
   if (Date.now() - lastClientSeenAt < config.watchdogMs) return;
+
+  // Nobody is watching, so there is nothing to watch fast for.
+  if (telemetry.rate.realtime && telemetry.rate.holds.length === 0) {
+    console.log('[pm] watchdog: no clients connected, dropping back to idle sampling');
+    void telemetry.setRealtime(false);
+  }
+
+  if (!dirty) return;
   console.warn('[pm] watchdog: no clients connected, reverting to stock settings');
   void restoreStock();
 }, 30_000);
 
 async function restoreStock(): Promise<void> {
   await governor.disable();
+  releaseGovernorRate?.();
+  releaseGovernorRate = null;
   await applySettings(labScheme, STOCK);
   currentSettings = STOCK;
   keeper.setDesired(STOCK);
@@ -138,13 +174,14 @@ async function fullState() {
     profiles: PROFILES,
     latest: telemetry.latest,
     benchRunning: isRunning(),
-    sampleIntervalMs: config.sampleIntervalMs,
+    rate: telemetry.rate,
     scheme: { lab: labScheme, original: originalScheme },
   };
 }
 
 const server = Bun.serve({
   port: config.port,
+  hostname: config.host,
   idleTimeout: 120,
 
   async fetch(req, srv) {
@@ -171,13 +208,23 @@ const server = Bun.serve({
 
       if (path === '/api/topology') return json(topology);
 
+      if (path === '/api/rate' && req.method === 'POST') {
+        const body = (await req.json()) as { realtime: boolean };
+        const rate = await telemetry.setRealtime(Boolean(body.realtime));
+        broadcast('rate', rate);
+        return json(rate);
+      }
+
       if (path === '/api/settings' && req.method === 'GET') {
-        currentSettings = await readSettings(labScheme);
+        // Normalised on the way in: the platform reports its own adjusted values for
+// the pinned fields, and echoing those back would advertise a state the app
+// does not actually honour.
+currentSettings = normalise(await readSettings(labScheme));
         return json(currentSettings);
       }
 
       if (path === '/api/settings' && req.method === 'POST') {
-        const body = (await req.json()) as Settings;
+        const body = normalise((await req.json()) as Settings);
         await applySettings(labScheme, body);
         // Trust the request, not a readback: the platform zeroes frequency
         // caps within seconds, so re-reading would report 0 and the keeper
@@ -195,9 +242,12 @@ const server = Bun.serve({
         const profile = findProfile(id);
         if (!profile) return fail(`unknown profile: ${id}`, 404);
         await applySettings(labScheme, profile.settings);
-        currentSettings = profile.settings;
+        currentSettings = normalise(profile.settings);
         keeper.setDesired(currentSettings);
         dirty = !isStock(currentSettings);
+        // Same as the settings panel: a profile is a choice worth remembering,
+        // and without this a restart could only ever restore hand-set values.
+        kvSet('lastSettings', currentSettings);
         broadcast('settings', currentSettings);
         return json({ applied: profile.id, settings: currentSettings });
       }
@@ -223,10 +273,17 @@ const server = Bun.serve({
           ceilingMhz?: number;
         };
         if (body.enabled) {
+          // The control loop servos on measured package power; at one sample a
+          // minute it would take an hour to converge, so it holds realtime for
+          // as long as it is running.
+          releaseGovernorRate ??= telemetry.hold('governor');
+          await telemetry.settled();
           await governor.enable(body.targetWatts ?? 25, body.floorMhz, body.ceilingMhz);
           dirty = true;
         } else {
           await governor.disable();
+          releaseGovernorRate?.();
+          releaseGovernorRate = null;
           // The panel's own caps take over again once the governor lets go.
           keeper.setDesired(currentSettings);
           dirty = !isStock(currentSettings);
@@ -236,11 +293,16 @@ const server = Bun.serve({
 
       if (path === '/api/bench' && req.method === 'POST') {
         const body = await req.json();
+        // A run is aggregated from the samples captured while it lasts, so a
+        // twenty-second benchmark needs realtime telemetry or it has nothing
+        // to average. Wait for the switch before starting the load.
+        const releaseRate = telemetry.hold('benchmark');
+        await telemetry.settled();
         // Fire and forget: progress streams over the websocket so a long
         // 7-Zip run does not sit on an open HTTP request.
-        void runBenchmark(body, (p) => broadcast('bench', p), labScheme).catch((e) =>
-          broadcast('bench', { phase: 'error', message: String(e) }),
-        );
+        void runBenchmark(body, (p) => broadcast('bench', p), labScheme)
+          .catch((e) => broadcast('bench', { phase: 'error', message: String(e) }))
+          .finally(releaseRate);
         return json({ started: true });
       }
 
@@ -269,14 +331,9 @@ const server = Bun.serve({
       return fail(e, 500);
     }
 
-    // Static frontend, when built.
-    if (existsSync(WEB_DIST)) {
-      const rel = path === '/' ? 'index.html' : path.slice(1);
-      const file = Bun.file(resolve(WEB_DIST, rel));
-      if (await file.exists()) return new Response(file);
-      const index = Bun.file(resolve(WEB_DIST, 'index.html'));
-      if (await index.exists()) return new Response(index);
-    }
+    // Static frontend: embedded in the compiled build, web/dist otherwise.
+    const page = await serveWeb(path);
+    if (page) return page;
 
     return new Response(
       'PowerManagement API is running. Start the Vite dev server with `bun run web`.',
@@ -300,7 +357,7 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[pm] listening on http://localhost:${server.port}`);
+console.log(`[pm] listening on http://${config.host}:${server.port}`);
 
 // ---------------------------------------------------------------- shutdown
 

@@ -47,7 +47,6 @@ export interface Settings {
   p: ClassSettings;
   e: ClassSettings;
   boostMode: number;
-  coolingPolicy: number;
 }
 
 export interface GovernorState {
@@ -71,6 +70,15 @@ export interface Calibration {
   calibratedAt: number | null;
 }
 
+export interface RateState {
+  intervalMs: number;
+  realtime: boolean;
+  /** Non-empty when the server is forcing realtime for work in progress. */
+  holds: string[];
+  idleIntervalMs: number;
+  realtimeIntervalMs: number;
+}
+
 export interface AppState {
   topology: Topology;
   settings: Settings;
@@ -79,7 +87,7 @@ export interface AppState {
   profiles: Profile[];
   latest: Sample | null;
   benchRunning: boolean;
-  sampleIntervalMs: number;
+  rate: RateState;
   scheme: { lab: string; original: string };
 }
 

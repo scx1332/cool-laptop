@@ -10,6 +10,19 @@ const BOOST_MODES = [
   'Efficient aggressive',
 ];
 
+/** A frequency cap of 0 means "no cap". Rendered literally that put the thumb
+ *  hard left — the position that otherwise means "slowest possible" — so an
+ *  unrestricted CPU looked like a maximally throttled one. Off is therefore
+ *  given its own stop one step past the top of the range, where "no limit"
+ *  belongs, and the raw 0 never reaches the input. */
+const CAP_MIN_MHZ = 400;
+const CAP_MAX_MHZ = 4000;
+const CAP_STEP_MHZ = 100;
+const CAP_OFF = CAP_MAX_MHZ + CAP_STEP_MHZ;
+
+const capToSlider = (mhz: number) => (mhz === 0 ? CAP_OFF : mhz);
+const sliderToCap = (v: number) => (v >= CAP_OFF ? 0 : v);
+
 interface ClassPanelProps {
   title: string;
   color: string;
@@ -37,44 +50,17 @@ function ClassPanel({ title, color, cpus, baseMhz, value, onChange }: ClassPanel
         <input
           id={`${title}-freq`}
           type="range"
-          min={0}
-          max={4000}
-          step={100}
-          value={value.freqMax}
+          min={CAP_MIN_MHZ}
+          max={CAP_OFF}
+          step={CAP_STEP_MHZ}
+          value={capToSlider(value.freqMax)}
           style={{ accentColor: color }}
-          onChange={(e) => set('freqMax', Number(e.target.value))}
+          aria-valuetext={value.freqMax === 0 ? 'off, no cap' : `${value.freqMax} MHz`}
+          onChange={(e) => set('freqMax', sliderToCap(Number(e.target.value)))}
         />
-        <span className="num">{value.freqMax === 0 ? 'off' : `${value.freqMax}`}</span>
-      </div>
-
-      <div className="row">
-        <label htmlFor={`${title}-smax`}>Max state</label>
-        <input
-          id={`${title}-smax`}
-          type="range"
-          min={5}
-          max={100}
-          step={5}
-          value={value.stateMax}
-          style={{ accentColor: color }}
-          onChange={(e) => set('stateMax', Number(e.target.value))}
-        />
-        <span className="num">{value.stateMax}%</span>
-      </div>
-
-      <div className="row">
-        <label htmlFor={`${title}-smin`}>Min state</label>
-        <input
-          id={`${title}-smin`}
-          type="range"
-          min={0}
-          max={100}
-          step={5}
-          value={value.stateMin}
-          style={{ accentColor: color }}
-          onChange={(e) => set('stateMin', Number(e.target.value))}
-        />
-        <span className="num">{value.stateMin}%</span>
+        <span className="num">
+          {value.freqMax === 0 ? 'no cap' : `${(value.freqMax / 1000).toFixed(2)} GHz`}
+        </span>
       </div>
 
       <div className="row">
@@ -84,27 +70,12 @@ function ClassPanel({ title, color, cpus, baseMhz, value, onChange }: ClassPanel
           type="range"
           min={0}
           max={100}
-          step={5}
+          step={1}
           value={value.epp}
           style={{ accentColor: color }}
           onChange={(e) => set('epp', Number(e.target.value))}
         />
         <span className="num">{value.epp}</span>
-      </div>
-
-      <div className="row">
-        <label htmlFor={`${title}-cores`}>Cores unparked</label>
-        <input
-          id={`${title}-cores`}
-          type="range"
-          min={5}
-          max={100}
-          step={5}
-          value={value.maxCores}
-          style={{ accentColor: color }}
-          onChange={(e) => set('maxCores', Number(e.target.value))}
-        />
-        <span className="num">{value.maxCores}%</span>
       </div>
     </div>
   );
@@ -211,17 +182,6 @@ export function Controls({
               </option>
             ))}
           </select>
-          <label htmlFor="cool" style={{ flex: '0 0 auto', marginLeft: 16 }}>
-            Cooling
-          </label>
-          <select
-            id="cool"
-            value={draft.coolingPolicy}
-            onChange={(e) => setDraft({ ...draft, coolingPolicy: Number(e.target.value) })}
-          >
-            <option value={0}>Passive — throttle first</option>
-            <option value={1}>Active — fan first</option>
-          </select>
         </div>
 
         <div className="btn-row" style={{ marginTop: 12 }}>
@@ -237,10 +197,12 @@ export function Controls({
           </button>
         </div>
 
-        <p className="note warn">
-          Cores unparked appears inert on this machine: with the limit set to 25% and the CPU at
-          4% load, no core ever reported parked. Windows leaves parking off on modern hybrid
-          chips and steers work with the thread scheduler instead.
+        <p className="note">
+          Processor state percentages, core parking and the cooling policy are not exposed:
+          below 100% the state ceiling turns turbo off and collapses the clock — measured here,
+          75% cost two thirds of it — core parking never engaged on this chip at all, and the
+          cooling policy does nothing on this laptop, where the embedded controller owns the fan.
+          All are pinned, so the frequency cap above is the only ceiling.
         </p>
       </div>
 
@@ -275,7 +237,7 @@ export function Controls({
             value={gov.floorMhz}
             onChange={(e) => setGov({ ...gov, floorMhz: Number(e.target.value) })}
           />
-          <span className="num">{gov.floorMhz}</span>
+          <span className="num">{(gov.floorMhz / 1000).toFixed(2)} GHz</span>
         </div>
 
         <div className="btn-row" style={{ marginTop: 10 }}>

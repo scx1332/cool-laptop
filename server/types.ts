@@ -59,8 +59,6 @@ export interface Settings {
   e: ClassSettings;
   /** Processor performance boost mode, 0 = disabled ... 6. */
   boostMode: number;
-  /** System cooling policy: 0 = passive (throttle first), 1 = active (fan first). */
-  coolingPolicy: number;
 }
 
 export interface GovernorState {

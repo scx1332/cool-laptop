@@ -1,6 +1,8 @@
 node_modules/
 web/dist/
 data/
+dist/
+server/generated/
 *.db
 *.db-wal
 *.db-shm
