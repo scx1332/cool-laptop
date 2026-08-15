@@ -51,11 +51,16 @@ NSSM as a LocalSystem service starting at boot. NSSM rather than `sc create` bec
 binary is an ordinary console program, and Windows kills anything registered as a service
 that does not answer the service control protocol within thirty seconds.
 
-`-RestoreLast` re-applies the settings last chosen in the UI when the service starts, so
-a cap survives a reboot, and disables the client watchdog — unattended is the intended
-state for a service, so "no browser tab is open" must stop meaning "someone forgot, undo
-everything". Without the flag the service comes up at whatever the lab scheme holds and
-still reverts to stock five minutes after the last tab closes.
+`-RestoreLast` re-applies the settings last chosen in the UI when the service starts, so a
+cap survives a reboot. Without it every boot starts at stock — and explicitly so: the lab
+scheme persists across reboots and holds whatever was last written to it, so a start that
+merely assumed the scheme was clean would silently inherit the previous session's cap.
+Shut down on Min, come back at 400 MHz with nothing on screen saying why.
+
+The client watchdog is off either way. It exists so a forgotten cap cannot outlive the tab
+that set it, which is right for a program you launch in a terminal and wrong for a service:
+unattended is the intended state, so "no browser tab is open" must not come to mean
+"someone forgot, undo everything" while the machine is simply being used.
 
 Stopping the service (`nssm stop PowerManagement`, or the Services panel) sends Ctrl-C
 rather than killing the process, so the normal shutdown path runs: caps cleared, original

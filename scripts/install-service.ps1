@@ -26,9 +26,12 @@
 
 .PARAMETER RestoreLast
     Re-apply the settings last chosen in the UI when the service starts, so a
-    frequency cap survives a reboot. The client watchdog is disabled alongside
-    it — unattended is the intended state for a service, so "no browser tab is
-    open" must stop meaning "someone forgot, undo everything".
+    frequency cap survives a reboot. Without it every boot starts at stock, and
+    the lab scheme is explicitly cleared on the way up rather than inherited.
+
+    The client watchdog is disabled either way — unattended is the intended
+    state for a service, so "no browser tab is open" must not mean "someone
+    forgot, undo everything".
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\install-service.ps1 -RestoreLast
@@ -152,10 +155,15 @@ switch ($Action) {
         # One argument per variable. Joining them into a single string instead
         # produces one variable whose value is the rest of the line, which fails
         # silently: PM_PORT parses as NaN and the server binds a random port.
-        $envVars = @("PM_PORT=$Port")
+        # The watchdog is always off for a service, whether or not settings are
+        # restored at boot. It exists so a forgotten cap cannot outlive the tab
+        # that set it, which is the right instinct for a program you launch in a
+        # terminal and the wrong one here: a service is meant to be unattended,
+        # and "no browser tab is open" must not come to mean "someone forgot,
+        # undo everything" while the machine is simply being used.
+        $envVars = @("PM_PORT=$Port", 'PM_WATCHDOG_MS=0')
         if ($RestoreLast) {
             $envVars += 'PM_RESTORE_LAST=1'
-            $envVars += 'PM_WATCHDOG_MS=0'
         }
         & $nssm set $ServiceName AppEnvironmentExtra @envVars | Out-Null
 

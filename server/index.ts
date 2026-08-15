@@ -52,8 +52,11 @@ keeper.setDesired(currentSettings);
 keeper.start(labScheme);
 
 // Started headless with PM_RESTORE_LAST=1, put back whatever the UI last
-// applied. Without this a service comes up on the lab scheme as the platform
-// left it, which after a hard stop is neither stock nor what was asked for.
+// applied. Otherwise start from stock — explicitly, not by assuming the scheme
+// is already clean. The lab scheme persists across reboots and holds whatever
+// was last written to it, so a boot that skipped this would silently inherit
+// the previous session's cap: shut down on Min, come back at 400 MHz with
+// nothing on screen saying so.
 if (config.restoreLast) {
   const last = kvGet<Settings>('lastSettings');
   if (last) {
@@ -66,6 +69,12 @@ if (config.restoreLast) {
         `E cap ${last.e.freqMax || 'off'} MHz, EPP ${last.p.epp}/${last.e.epp}`,
     );
   }
+} else if (!isStock(currentSettings)) {
+  await applySettings(labScheme, STOCK);
+  currentSettings = STOCK;
+  keeper.setDesired(STOCK);
+  dirty = false;
+  console.log('[pm] cleared leftover limits from the lab scheme — starting at stock');
 }
 
 await telemetry.start();
