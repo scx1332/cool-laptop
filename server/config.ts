@@ -32,6 +32,12 @@ export const config = {
    *  limited with nothing on screen saying so, so it is off unless asked for. */
   restoreLast: process.env.PM_RESTORE_LAST === '1',
 
+  /** Profile to apply on startup, by id. This is the "what should this machine
+   *  be when nobody has said otherwise" setting: unlike restoreLast it does not
+   *  depend on what was last chosen, so every boot lands in the same known
+   *  state. Unset means stock. Ignored when restoreLast wins. */
+  bootProfile: process.env.PM_BOOT_PROFILE || null,
+
   /** Telemetry cadence when nothing needs a close look. One sample a minute is
    *  enough to see where the machine is sitting and costs almost nothing: the
    *  sidecar sleeps between reads and each counter read is an average over the

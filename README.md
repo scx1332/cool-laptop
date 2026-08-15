@@ -51,11 +51,18 @@ NSSM as a LocalSystem service starting at boot. NSSM rather than `sc create` bec
 binary is an ordinary console program, and Windows kills anything registered as a service
 that does not answer the service control protocol within thirty seconds.
 
-`-RestoreLast` re-applies the settings last chosen in the UI when the service starts, so a
-cap survives a reboot. Without it every boot starts at stock — and explicitly so: the lab
-scheme persists across reboots and holds whatever was last written to it, so a start that
-merely assumed the scheme was clean would silently inherit the previous session's cap.
-Shut down on Min, come back at 400 MHz with nothing on screen saying why.
+By default the service applies the **Cool** profile on every start, so the machine always
+comes up in the same known state — turbo off — no matter what was set before the reboot.
+`-BootProfile min|cool|default` picks a different one, `-BootProfile ''` comes up at stock.
+
+The profile is applied rather than assumed. The lab scheme persists across reboots and
+holds whatever was last written to it, so a start that merely checked whether things
+looked clean would silently inherit the previous session's cap: shut down on Min, come
+back at 400 MHz with nothing on screen saying why.
+
+`-RestoreLast` answers the same question from history instead of from a fixed choice — it
+re-applies the settings last chosen in the UI, so whatever was in force survives the
+reboot. It overrides `-BootProfile`.
 
 The client watchdog is off either way. It exists so a forgotten cap cannot outlive the tab
 that set it, which is right for a program you launch in a terminal and wrong for a service:
@@ -77,6 +84,7 @@ entirely for one that listens from boot; `PM_HOST=0.0.0.0` exposes it deliberate
 | `PM_PORT` | `4317` | HTTP/WebSocket port |
 | `PM_HOST` | `127.0.0.1` | Bind address. There is no authentication — expose it knowingly |
 | `PM_RESTORE_LAST` | unset | `1` re-applies the last settings at startup, for unattended use |
+| `PM_BOOT_PROFILE` | unset | Profile id applied at startup (`min`, `cool`, `default`). Unset starts at stock; ignored when `PM_RESTORE_LAST` is set |
 | `PM_INTERVAL_MS` | `60000` | Idle telemetry cadence |
 | `PM_REALTIME_MS` | `1000` | Cadence in realtime mode |
 | `PM_DB` | `memory` | `file` for `data/power.db`, or a path. In memory by default: the sample table is a rolling window nothing outside a session reads |

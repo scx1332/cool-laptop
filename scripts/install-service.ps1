@@ -24,10 +24,16 @@
 .PARAMETER Action
     install (default), uninstall, or status.
 
+.PARAMETER BootProfile
+    Profile applied on every start, so the machine always comes up in the same
+    known state regardless of what was set before. Defaults to 'cool'. Pass ''
+    to come up at stock.
+
 .PARAMETER RestoreLast
-    Re-apply the settings last chosen in the UI when the service starts, so a
-    frequency cap survives a reboot. Without it every boot starts at stock, and
-    the lab scheme is explicitly cleared on the way up rather than inherited.
+    Re-apply the settings last chosen in the UI when the service starts instead,
+    so whatever was in force survives a reboot. Overrides BootProfile — the two
+    answer the same question in opposite ways, one from history and one from a
+    fixed choice.
 
     The client watchdog is disabled either way — unattended is the intended
     state for a service, so "no browser tab is open" must not mean "someone
@@ -42,6 +48,12 @@ param(
     [string]$Action = 'install',
 
     [switch]$RestoreLast,
+
+    # Profile applied on every boot, so the machine always comes up in the same
+    # known state. Cool by default: turbo off is the everyday setting on this
+    # laptop, and a service exists precisely so that does not have to be clicked
+    # after each reboot. Pass '' to boot at stock instead.
+    [string]$BootProfile = 'cool',
 
     [string]$ServiceName = 'PowerManagement',
     [string]$InstallDir = "$env:ProgramFiles\PowerManagement",
@@ -164,12 +176,17 @@ switch ($Action) {
         $envVars = @("PM_PORT=$Port", 'PM_WATCHDOG_MS=0')
         if ($RestoreLast) {
             $envVars += 'PM_RESTORE_LAST=1'
+        } elseif ($BootProfile) {
+            $envVars += "PM_BOOT_PROFILE=$BootProfile"
         }
         & $nssm set $ServiceName AppEnvironmentExtra @envVars | Out-Null
 
         & $nssm start $ServiceName | Out-Null
         Start-Sleep -Seconds 8
         Show-Status
-        Write-Host "Settings restored on start: $([bool]$RestoreLast). Logs: $InstallDir\logs\service.log"
+        $onStart = if ($RestoreLast) { 'last settings used' }
+                   elseif ($BootProfile) { "profile '$BootProfile'" }
+                   else { 'stock' }
+        Write-Host "Applied on every start: $onStart. Logs: $InstallDir\logs\service.log"
     }
 }

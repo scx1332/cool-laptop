@@ -69,12 +69,22 @@ if (config.restoreLast) {
         `E cap ${last.e.freqMax || 'off'} MHz, EPP ${last.p.epp}/${last.e.epp}`,
     );
   }
-} else if (!isStock(currentSettings)) {
-  await applySettings(labScheme, STOCK);
-  currentSettings = STOCK;
-  keeper.setDesired(STOCK);
-  dirty = false;
-  console.log('[pm] cleared leftover limits from the lab scheme — starting at stock');
+} else {
+  // Otherwise land in a fixed known state: the configured boot profile, or
+  // stock if none is set. Applied unconditionally rather than only when the
+  // scheme looks dirty — "the machine is always this on boot" is the whole
+  // point, and skipping the write when the readback happens to match would
+  // leave it depending on a readback the platform is actively rewriting.
+  const boot = config.bootProfile ? findProfile(config.bootProfile) : null;
+  if (config.bootProfile && !boot) {
+    console.error(`[pm] PM_BOOT_PROFILE="${config.bootProfile}" is not a profile — using stock`);
+  }
+  const settings = normalise(boot?.settings ?? STOCK);
+  await applySettings(labScheme, settings);
+  currentSettings = settings;
+  keeper.setDesired(settings);
+  dirty = !isStock(settings);
+  console.log(`[pm] startup state: ${boot ? `profile "${boot.name}"` : 'stock'}`);
 }
 
 await telemetry.start();
